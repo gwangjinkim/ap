@@ -62,19 +62,47 @@ ap/
 
 ## The command: `ap:ap`
 
-### Practical signature
+`ap` is REPL-first and intentionally permissive: you can call it with 0–2 positional arguments *plus* keywords.
+
+### Calling forms
 
 ```lisp
-(ap:ap pkg query &key :k :exp :case :lim :min :tgt :u :s)
+(ap)                       ; pkg=".", q=nil
+(ap q)                     ; treat single arg as query (default)
+(ap pkg q)                 ; explicit pkg selector + query
+(ap :pkg pkg :q q ...)     ; keyword-only style
+
+;; Keywords: :k :exp :case :lim :min :tgt :u :s   (also :pkg and :q)
 ```
 
-- `pkg` — package selector (see below)
-- `query` — search string (see below)
-- keyword args are intentionally short.
+Positional convenience rules:
+- 0 args → `pkg = "."`, `q = NIL`
+- 1 arg  → **query by default**; you can still force package selection via `:pkg`
+- 2 args → `(pkg q)`
+
+You can always override with `:pkg` and/or `:q`.
+
+> Introspection tip: `(describe 'ap::%ap)` shows the full `&key` interface with defaults.
 
 ---
 
 ## Package selectors (do-what-I-mean)
+
+### One-arg ambiguity note
+
+If you write `(ap "CL")`, do you mean the package **CL** or the query string **"CL"**?
+
+`ap` chooses the simplest rule for fast REPL usage:
+- with **one positional argument**, it is treated as **query**
+- if you want a single positional package selector, use `:pkg`:
+
+```lisp
+(ap :pkg "CL")           ; list exported API of CL (description-first)
+(ap :pkg nil :q "hash")  ; all packages, query
+```
+
+(And of course, `(ap "CL" "hash")` is unambiguous.)
+
 
 ### Current package: `"."`
 
