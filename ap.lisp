@@ -249,11 +249,11 @@ Semantics:
                             (:both (or (field-match scanner name)
                                        (field-match scanner doc)))))))))))
 
-           (compile (x)
+           (%%compile (x)
              (cond
                ((%qexpr-p x)
                 (let* ((op (car x))
-                       (subs (mapcar #'compile (cdr x))))
+                       (subs (mapcar #'%%compile (cdr x))))
                   (ecase op
                     (or  (lambda (name doc tgt)
                            (some (lambda (f) (funcall f name doc tgt)) subs)))
@@ -262,12 +262,12 @@ Semantics:
                ;; A plain list that is NOT (and/or ...) should default to (or ...)
                ;; This makes (sheet workbook) mean OR by default (your example).
                ((consp x)
-                (let ((subs (mapcar #'compile x)))
+                (let ((subs (mapcar #'%%compile x)))
                   (lambda (name doc tgt)
                     (some (lambda (f) (funcall f name doc tgt)) subs))))
                (t
                 (atom-matcher x)))))
-    (compile q)))
+    (%%compile q)))
 
 
 (defun %qmode (q)
