@@ -337,68 +337,104 @@ where ITEMS is the internal item list used for printing."
               (make-string 96 :initial-element #\=) n)
       (values n items))))
 
+(defun %pkg-name->package (name)
+  "Return package for NAME (string/symbol/keyword), case-insensitive.
+Return NIL if not found."
+  (etypecase name
+    (string (find-package (string-upcase name)))
+    (symbol (find-package (string-upcase (symbol-name name))))))
+
+(defun %package-designator-p (x)
+  "True if X looks like a *single* package selector."
+  (cond
+    ((null x) t)                          ; NIL => all packages
+    ((packagep x) t)
+    ((and (stringp x) (or (string= x ".") (string= x ""))) t)
+    ((stringp x) (not (null (%pkg-name->package x))))
+    ((or (symbolp x) (keywordp x)) (not (null (%pkg-name->package x))))
+    (t nil)))
+
+(defun %list-of-packages-p (x)
+  "True if X is a list meant as a package selector.
+
+We accept:
+  - a proper list where *every* element is a package designator
+  - the empty list NIL is handled separately (meaning ALL packages)"
+  (and (listp x)
+       (not (null x))
+       (every #'%package-designator-p x)))
+
+(defun %ap-option-keyword-p (x)
+  "Keywords understood by AP's public interface."
+  (and (keywordp x)
+       (member x '(:pkg :q :k :exp :case :lim :min :tgt :u :s)
+               :test #'eq)))
+
+(defun %fix-implicit-q (plist)
+  "Accept (:pkg X \"q\" ...) by inserting :q if :q is absent and plist is odd.
+Also keeps plist unchanged if already well-formed."
+  (cond
+    ((null plist) plist)
+    ((member :q plist :test #'eq) plist)
+    ;; odd length and last item is a non-keyword => treat it as implicit :q value
+    ((and (oddp (length plist))
+          (not (keywordp (car (last plist)))))
+     (append (butlast plist 1) (list :q (car (last plist)))))
+    (t plist)))
+
 (defun ap (&rest args)
-  "Public REPL-friendly AP (warning-free on SBCL), with flexible positional args.
+  "Public REPL-friendly AP.
 
-Calling forms:
+DWIM positional parsing:
 
-  (ap)
-    => pkg=\".\", q=nil
+  1) If the first argument is a package selector, consume it as PKG.
+     Package selector rules:
+       - NIL => all packages
+       - package object => that package
+       - list => list of packages (each element must be a package designator)
+       - string => package iff it names an existing package (case-insensitive),
+                   or \".\" / \"\" special cases
+       - symbol/keyword => package iff it names an existing package (case-insensitive)
 
-  (ap q)
-    => pkg=\".\", q=q
+  2) Next positional (if present) is Q, unless it is a recognized AP option keyword.
 
-  (ap pkg q)
-    => pkg=pkg, q=q
+     Q may be:
+       - string / NIL (regex default, exact with \"=...\")
+       - an alist (you requested this)
+       - any other object (treated as query payload; matcher decides)
 
-  Keyword style:
-    (ap :pkg pkg :q q ...)
+  3) Remaining arguments are treated as a keyword plist.
 
-  Convenience mixed style (implicit :q):
-    (ap :pkg pkg q ...)
-    (ap :q q :pkg pkg ...)   ; also allowed if :q missing but trailing string exists
+Keyword style also works:
+  (ap :pkg ... :q ...)
 
-Examples:
-  (ap \"ap\")
-  (ap \"CL\" \"hash\" :k '(function macro))
-  (ap :pkg \"CL\" :q \"hash\" :tgt :doc)
-  (ap :pkg :cl-excel \"ap\")          ; implicit :q
-  (ap :pkg :cl-excel :q \"ap\")       ; explicit :q (same)
+Convenience:
+  (:pkg X \"q\" ...) is accepted as (:pkg X :q \"q\" ...)
 
 Introspection:
   (describe 'ap::%ap) shows the full keyword interface and defaults."
-  ;; Keyword-first mode (but allow the \"implicit :q\" convenience).
-  (when (and args (keywordp (first args)))
-    ;; If plist is odd-length, and the last element is not a keyword,
-    ;; treat it as an implicit :q if :q is not present.
-    (let* ((has-q (member :q args))
-           (oddp (oddp (length args)))
-           (last (car (last args))))
-      (when (and oddp (not has-q) (not (keywordp last)))
-        (setf args (append args (list :q last))
-              args (butlast args 1))))
-    ;; Additionally: common pattern (:pkg X \"q\") -> insert :q
-    ;; i.e., if :pkg present, :q missing, and exactly one trailing non-keyword value exists.
-    (let* ((has-pkg (member :pkg args)))
-      (when (and has-pkg (not (member :q args)))
-        (let ((tail (last args)))
-          (when (and tail (not (keywordp (car tail))))
-            (setf args (append (butlast args 1) (list :q (car tail))))))))
-    (return-from ap (apply #'%ap args)))
+  ;; Case 0: keyword-style call starting with an AP option key
+  (when (and args (%ap-option-keyword-p (first args)))
+    (return-from ap (apply #'%ap (%fix-implicit-q args))))
 
-  ;; Positional mode: parse up to 2 positionals, then keywords
-  (let* ((a1 (first args))
-         (a2 (second args))
-         (pos-count (cond ((null args) 0)
-                          ((or (null a2) (keywordp a2)) 1)
-                          (t 2)))
-         (plist (cond
-                 ((= pos-count 0) nil)
-                 ((= pos-count 1) (if (keywordp a2) (rest args) nil))
-                 (t (nthcdr 2 args))))
-         (pkg (ecase pos-count (0 ".") (1 ".") (2 a1)))
-         (q   (ecase pos-count (0 nil) (1 a1) (2 a2))))
-    (apply #'%ap
-           :pkg (if (and plist (member :pkg plist)) (getf plist :pkg) pkg)
-           :q   (if (and plist (member :q plist))   (getf plist :q)   q)
-           plist)))
+  (let* ((pkg ".")
+         (q nil)
+         (rest args))
+
+    ;; Step 1: consume PKG if present and looks like a package selector
+    (when (and rest
+               (or (%package-designator-p (first rest))
+                   (%list-of-packages-p (first rest))))
+      (setf pkg (pop rest)))
+
+    ;; Step 2: consume Q if present and not starting keyword-plist
+    (when (and rest (not (%ap-option-keyword-p (first rest))))
+      (setf q (pop rest)))
+
+    ;; Step 3: remaining is keyword plist (maybe empty)
+    (let ((plist (%fix-implicit-q rest)))
+      ;; Also allow explicit overrides:
+      (apply #'%ap
+             :pkg (if (member :pkg plist :test #'eq) (getf plist :pkg) pkg)
+             :q   (if (member :q   plist :test #'eq) (getf plist :q)   q)
+             plist))))
