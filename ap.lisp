@@ -378,37 +378,25 @@ Includes NIL (meaning all packages) and special strings \".\"/\"\"."
     (t plist)))
 
 (defun ap (&rest args)
-  "Public REPL-friendly AP.
+  "Public REPL-friendly AP with DWIM positional parsing.
 
-DWIM positional parsing:
+Rules:
+  - If first arg is a package designator (package/symbol/keyword/string naming a package,
+    NIL, \".\", \"\"), it is PKG.
+  - If first arg is a non-empty list, it is a list of packages if every element is a
+    package designator.
+  - Otherwise, first arg is Q (query).
+  - Q may be a string/NIL, or an alist (or any object).
+  - Remaining args are a keyword plist (supports (:pkg X \"q\") implicit :q).
 
-  1) If the first argument is a package selector, consume it as PKG.
-     Package selector rules:
-       - NIL => all packages
-       - package object => that package
-       - list => list of packages (each element must be a package designator)
-       - string => package iff it names an existing package (case-insensitive),
-                   or \".\" / \"\" special cases
-       - symbol/keyword => package iff it names an existing package (case-insensitive)
-
-  2) Next positional (if present) is Q, unless it is a recognized AP option keyword.
-
-     Q may be:
-       - string / NIL (regex default, exact with \"=...\")
-       - an alist (you requested this)
-       - any other object (treated as query payload; matcher decides)
-
-  3) Remaining arguments are treated as a keyword plist.
-
-Keyword style also works:
-  (ap :pkg ... :q ...)
-
-Convenience:
-  (:pkg X \"q\" ...) is accepted as (:pkg X :q \"q\" ...)
-
-Introspection:
-  (describe 'ap::%ap) shows the full keyword interface and defaults."
-  ;; Case 0: keyword-style call starting with an AP option key
+Examples:
+  (ap :cl-excel \"sheet\")
+  (ap \"cl-excel\" \"sheet\")
+  (ap \"sheet\")
+  (ap :pkg :cl-excel \"sheet\")            ; implicit :q
+  (ap '(:cl :sb-ext) \"hash\" :k '(macro))"
+  ;; Keyword-first mode only if first keyword is an actual AP option key.
+  ;; Otherwise keywords like :cl-excel are treated as positional PKG designators.
   (when (and args (%ap-option-keyword-p (first args)))
     (return-from ap (apply #'%ap (%fix-implicit-q args))))
 
@@ -416,19 +404,17 @@ Introspection:
          (q nil)
          (rest args))
 
-    ;; Step 1: consume PKG if present and looks like a package selector
+    ;; consume PKG if first arg looks like pkg or list-of-pkgs
     (when (and rest
                (or (%package-designator-p (first rest))
                    (%list-of-packages-p (first rest))))
       (setf pkg (pop rest)))
 
-    ;; Step 2: consume Q if present and not starting keyword-plist
+    ;; consume Q if next arg exists and is not the start of a keyword plist
     (when (and rest (not (%ap-option-keyword-p (first rest))))
       (setf q (pop rest)))
 
-    ;; Step 3: remaining is keyword plist (maybe empty)
     (let ((plist (%fix-implicit-q rest)))
-      ;; Also allow explicit overrides:
       (apply #'%ap
              :pkg (if (member :pkg plist :test #'eq) (getf plist :pkg) pkg)
              :q   (if (member :q   plist :test #'eq) (getf plist :q)   q)
