@@ -58,17 +58,22 @@ Signals an error if not found."
     (t
      (error "Invalid package designator: ~S" x))))
 
-(defun %pkgs (sel)
+(defun %pkg-maybe (x)
+  "Like %PKG but returns NIL instead of error if not found."
+  (handler-case (%pkg x)
+    (error () nil)))
+
+(defun %pkgs (pkg)
+  "Return a list of package objects from PKG selector."
   (cond
-    ((or (null sel) (and (stringp sel) (string= sel "")))
+    ((or (null pkg) (and (stringp pkg) (string= pkg "")))
      (list-all-packages))
-    ((and (stringp sel) (string= sel "."))
+    ((and (stringp pkg) (string= pkg "."))
      (list *package*))
-    ((or (packagep sel) (stringp sel) (symbolp sel))
-     (list (%pkg sel)))
-    ((listp sel)
-     (mapcar #'%pkg sel))
-    (t (error "Unsupported package selector: ~S" sel))))
+    ((listp pkg)
+     (mapcar #'%pkg pkg))
+    (t
+     (list (%pkg pkg)))))
 
 (defun %line (s &key (max 140))
   (let ((s (and s (string-trim '(#\Space #\Tab #\Newline #\Return) s))))
@@ -129,6 +134,41 @@ Signals an error if not found."
           (declare (ignore _))
           (when (eq status :internal) (push s out)))))
     (remove-duplicates out :test #'eq)))
+
+;;; ---- parsing helpers ----
+
+(defun %ap-option-keyword-p (x)
+  "Keywords understood by AP's public interface."
+  (and (keywordp x)
+       (member x '(:pkg :q :k :exp :case :lim :min :tgt :u :s)
+               :test #'eq)))
+
+(defun %package-designator-p (x)
+  "True if X can be interpreted as a *single* package selector."
+  (cond
+    ((null x) t)                           ; NIL => all packages
+    ((packagep x) t)
+    ((and (stringp x) (or (string= x ".") (string= x ""))) t)
+    ;; string/symbol/keyword counts as pkg designator only if package exists
+    ((or (stringp x) (symbolp x)) (not (null (%pkg-maybe x))))
+    (t nil)))
+
+(defun %list-of-packages-p (x)
+  "True if X is a non-empty list of package designators."
+  (and (listp x)
+       (not (null x))
+       (every #'%package-designator-p x)))
+
+(defun %fix-implicit-q (plist)
+  "Accept (:pkg X \"q\" ...) by inserting :q if :q is absent and plist is odd."
+  (cond
+    ((null plist) plist)
+    ((member :q plist :test #'eq) plist)
+    ((and (member :pkg plist :test #'eq)
+          (oddp (length plist))
+          (not (keywordp (car (last plist)))))
+     (append (butlast plist 1) (list :q (car (last plist)))))
+    (t plist)))
 
 ;;;; ----------------------------
 ;;;; Query inference (regex always, exact via "=...")
@@ -390,26 +430,38 @@ Includes NIL (meaning all packages) and special strings \".\"/\"\"."
      (append (butlast plist 1) (list :q (car (last plist)))))
     (t plist)))
 
+;;; ---- final public wrapper ----
+
 (defun ap (&rest args)
   "Public REPL-friendly AP with DWIM positional parsing.
 
-Rules:
-  - If first arg is a package designator (package/symbol/keyword/string naming a package,
-    NIL, \".\", \"\"), it is PKG.
-  - If first arg is a non-empty list, it is a list of packages if every element is a
-    package designator.
-  - Otherwise, first arg is Q (query).
-  - Q may be a string/NIL, or an alist (or any object).
-  - Remaining args are a keyword plist (supports (:pkg X \"q\") implicit :q).
+Parsing rules:
+
+1) If first arg is an AP option keyword (:pkg :q :k :exp :case :lim :min :tgt :u :s),
+   we treat the call as keyword-style and forward into %AP.
+
+2) Otherwise, if the first arg is a package selector, consume it as PKG.
+   - package objects, NIL, \".\"/\"\" strings are package selectors
+   - strings/symbols/keywords are package selectors only if FIND-PACKAGE succeeds
+   - lists are package selectors only if every element is a package selector
+
+3) After PKG is decided, the next positional argument (if present) is Q unless it is an AP option keyword.
+   Q may be a string, symbol, NIL, an alist, or any object.
+
+4) Remaining args must be a keyword plist (supports (:pkg X \"q\") as implicit :q).
 
 Examples:
-  (ap :cl-excel \"sheet\")
-  (ap \"cl-excel\" \"sheet\")
-  (ap \"sheet\")
-  (ap :pkg :cl-excel \"sheet\")            ; implicit :q
-  (ap '(:cl :sb-ext) \"hash\" :k '(macro))"
-  ;; Keyword-first mode only if first keyword is an actual AP option key.
-  ;; Otherwise keywords like :cl-excel are treated as positional PKG designators.
+  (ap \"sheet\")                       ; query in current package
+  (ap 'sheet)                          ; query symbol in current package
+  (ap :cl-excel \"sheet\")              ; package if CL-EXCEL package exists
+  (ap \"cl-excel\" 'sheet :tgt :name)   ; string pkg (case-insensitive), query symbol
+  (ap '(:cl :sb-ext) \"hash\" :k '(macro))
+  (ap :pkg :cl-excel \"sheet\")         ; implicit :q
+  (ap :pkg :cl-excel :q 'sheet)         ; explicit
+
+Introspection:
+  (describe 'ap::%ap) shows the full keyword interface and defaults."
+  ;; keyword-first mode
   (when (and args (%ap-option-keyword-p (first args)))
     (return-from ap (apply #'%ap (%fix-implicit-q args))))
 
@@ -417,13 +469,13 @@ Examples:
          (q nil)
          (rest args))
 
-    ;; consume PKG if first arg looks like pkg or list-of-pkgs
+    ;; PKG positional?
     (when (and rest
                (or (%package-designator-p (first rest))
                    (%list-of-packages-p (first rest))))
       (setf pkg (pop rest)))
 
-    ;; consume Q if next arg exists and is not the start of a keyword plist
+    ;; Q positional? (may be symbol, alist, etc.)
     (when (and rest (not (%ap-option-keyword-p (first rest))))
       (setf q (pop rest)))
 
