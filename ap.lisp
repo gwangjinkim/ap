@@ -339,49 +339,53 @@ where ITEMS is the internal item list used for printing."
 (defun ap (&rest args)
   "Public REPL-friendly AP (warning-free on SBCL), with flexible positional args.
 
-This function accepts:
-  - 0 positional args
-  - 1 positional arg (treated as QUERY by default)
-  - 2 positional args (PKG, QUERY)
-plus any number of keyword arguments.
-
 Calling forms:
 
   (ap)
-    => same as (ap \".\" nil)
+    => pkg=\".\", q=nil
 
   (ap q)
-    => same as (ap \".\" q)
-       (one positional arg is treated as QUERY by default)
+    => pkg=\".\", q=q
 
   (ap pkg q)
-    => explicit package selector + query
+    => pkg=pkg, q=q
 
-  (ap :pkg pkg :q q ...)
-    => keyword-only style
+  Keyword style:
+    (ap :pkg pkg :q q ...)
+
+  Convenience mixed style (implicit :q):
+    (ap :pkg pkg q ...)
+    (ap :q q :pkg pkg ...)   ; also allowed if :q missing but trailing string exists
 
 Examples:
-
-  (ap)                                  ; list current package API (exported)
-  (ap \"hash\")                           ; query in current package
-  (ap \".\" \"hash\")                       ; explicit current package + query
-  (ap nil \"hash|table\" :k '(function))   ; all packages, functions only
-  (ap \"SB-EXT\" \"=WITH-TIMEOUT\")         ; exact match
-  (ap :pkg \"CL\" :q \"hash\" :tgt :doc)    ; keyword-only style
-  (ap \"CL\" \"stream\" :min 0.08)          ; thematic ordering
-
-Ambiguity note:
-  If you write (ap \"CL\"), should that mean package CL or query \"CL\"?
-  AP treats a single positional argument as QUERY. If you mean a package,
-  write (ap :pkg \"CL\") or pass two args (ap \"CL\" nil).
+  (ap \"ap\")
+  (ap \"CL\" \"hash\" :k '(function macro))
+  (ap :pkg \"CL\" :q \"hash\" :tgt :doc)
+  (ap :pkg :cl-excel \"ap\")          ; implicit :q
+  (ap :pkg :cl-excel :q \"ap\")       ; explicit :q (same)
 
 Introspection:
-  (describe 'ap::%ap) shows the complete keyword interface and defaults."
-  ;; If first arg is a keyword => pure keyword mode.
+  (describe 'ap::%ap) shows the full keyword interface and defaults."
+  ;; Keyword-first mode (but allow the \"implicit :q\" convenience).
   (when (and args (keywordp (first args)))
+    ;; If plist is odd-length, and the last element is not a keyword,
+    ;; treat it as an implicit :q if :q is not present.
+    (let* ((has-q (member :q args))
+           (oddp (oddp (length args)))
+           (last (car (last args))))
+      (when (and oddp (not has-q) (not (keywordp last)))
+        (setf args (append args (list :q last))
+              args (butlast args 1))))
+    ;; Additionally: common pattern (:pkg X \"q\") -> insert :q
+    ;; i.e., if :pkg present, :q missing, and exactly one trailing non-keyword value exists.
+    (let* ((has-pkg (member :pkg args)))
+      (when (and has-pkg (not (member :q args)))
+        (let ((tail (last args)))
+          (when (and tail (not (keywordp (car tail))))
+            (setf args (append (butlast args 1) (list :q (car tail))))))))
     (return-from ap (apply #'%ap args)))
 
-  ;; Otherwise: parse up to two positionals, then a keyword plist.
+  ;; Positional mode: parse up to 2 positionals, then keywords
   (let* ((a1 (first args))
          (a2 (second args))
          (pos-count (cond ((null args) 0)
@@ -391,15 +395,8 @@ Introspection:
                  ((= pos-count 0) nil)
                  ((= pos-count 1) (if (keywordp a2) (rest args) nil))
                  (t (nthcdr 2 args))))
-         (pkg (ecase pos-count
-                (0 ".")
-                (1 ".")   ; 1 arg => query by default
-                (2 a1)))
-         (q   (ecase pos-count
-                (0 nil)
-                (1 a1)
-                (2 a2))))
-    ;; Allow explicit :pkg/:q to override positionals if present.
+         (pkg (ecase pos-count (0 ".") (1 ".") (2 a1)))
+         (q   (ecase pos-count (0 nil) (1 a1) (2 a2))))
     (apply #'%ap
            :pkg (if (and plist (member :pkg plist)) (getf plist :pkg) pkg)
            :q   (if (and plist (member :q plist))   (getf plist :q)   q)
