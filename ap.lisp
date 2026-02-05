@@ -301,8 +301,9 @@ Q can be:
   - list of atoms              => defaults to OR  (sheet workbook) == (or sheet workbook)
   - boolean DSL                => (or q1 q2 ...), (and q1 q2 ...), nestable
 
-Important: an ALIST query like ((:both . \"=SHEET\")) is an ATOM. It must *not*
-be treated as a plain list of sub-queries."
+Important:
+  An ALIST query like ((:both . \"=SHEET\")) is an ATOM. It must *not* be treated
+  as a list of sub-queries."
   (labels
       ((norm-s (x) (%q->string x))
        (mk-scanner (pat)
@@ -320,39 +321,45 @@ be treated as a plain list of sub-queries."
 
        (%atom-matcher (atom)
          (cond
-           ((or (null atom) (and (stringp atom) (string= atom \"\")))
+           ;; NIL / "" => match everything
+           ((or (null atom) (and (stringp atom) (string= atom "")))
             (lambda (name doc tgt) (declare (ignore name doc tgt)) t))
 
+           ;; ALIST => per-field tests, OR'ed across all pairs (like a search UI)
            ((%alistp atom)
-            (let ((pairs atom)
-                  (name-tests '())
-                  (doc-tests '())
+            (let ((name-tests '())
+                  (doc-tests  '())
                   (both-tests '()))
-              (dolist (kv pairs)
-                (destructuring-bind (k . v) kv
-                  (let ((s (norm-s v)))
-                    (when s
-                      (labels ((push-test (where s)
-                                 (push (if (exactp s)
-                                           (list :exact (drop= s))
-                                           (list :re (mk-scanner s)))
-                                       where)))
+              (flet ((add-name (s)
+                       (push (if (exactp s) (list :exact (drop= s)) (list :re (mk-scanner s)))
+                             name-tests))
+                     (add-doc (s)
+                       (push (if (exactp s) (list :exact (drop= s)) (list :re (mk-scanner s)))
+                             doc-tests))
+                     (add-both (s)
+                       (push (if (exactp s) (list :exact (drop= s)) (list :re (mk-scanner s)))
+                             both-tests)))
+                (dolist (kv atom)
+                  (destructuring-bind (k . v) kv
+                    (let ((s (norm-s v)))
+                      (when s
                         (cond
-                          ((eq k :name) (push-test name-tests s))
-                          ((eq k :doc)  (push-test doc-tests s))
-                          ((or (eq k :both) (eq k t)) (push-test both-tests s))
-                          (t (push-test both-tests s))))))))
-              (lambda (name doc tgt)
-                (declare (ignore tgt))
-                (flet ((run1 (test field)
-                         (ecase (first test)
-                           (:re    (field-match (second test) field))
-                           (:exact (field-exact (second test) field)))))
-                  (or (some (lambda (tst) (run1 tst name)) name-tests)
-                      (some (lambda (tst) (run1 tst doc))  doc-tests)
-                      (some (lambda (tst) (or (run1 tst name) (run1 tst doc)))
-                            both-tests))))))
+                          ((eq k :name) (add-name s))
+                          ((eq k :doc)  (add-doc s))
+                          ((or (eq k :both) (eq k t)) (add-both s))
+                          (t (add-both s)))))))
+                (lambda (name doc tgt)
+                  (declare (ignore tgt)) ; alist overrides :tgt
+                  (flet ((run1 (test field)
+                           (ecase (first test)
+                             (:re    (field-match (second test) field))
+                             (:exact (field-exact (second test) field)))))
+                    (or (some (lambda (tst) (run1 tst name)) name-tests)
+                        (some (lambda (tst) (run1 tst doc))  doc-tests)
+                        (some (lambda (tst) (or (run1 tst name) (run1 tst doc)))
+                              both-tests)))))))
 
+           ;; everything else => treat as a single atom query (regex or exact)
            (t
             (let* ((s (norm-s atom)))
               (if (exactp s)
@@ -371,12 +378,14 @@ be treated as a plain list of sub-queries."
                         (:both (or (field-match scanner name)
                                    (field-match scanner doc)))))))))))
 
+
        (%cmp (x)
          (cond
-           ;; IMPORTANT: alist is an atom, check it before CONSP list handling.
+           ;; IMPORTANT: alist is an atom, check it before generic CONSP handling.
            ((%alistp x)
             (%atom-matcher x))
 
+           ;; Boolean DSL: (or ...), (and ...)
            ((%qexpr-p x)
             (let* ((op (car x))
                    (subs (mapcar #'%cmp (cdr x))))
@@ -386,7 +395,7 @@ be treated as a plain list of sub-queries."
                 (and (lambda (name doc tgt)
                        (every (lambda (f) (funcall f name doc tgt)) subs))))))
 
-           ;; plain list (not and/or): default OR across elements
+           ;; Plain list (not and/or): default OR across elements
            ((consp x)
             (let ((subs (mapcar #'%cmp x)))
               (lambda (name doc tgt)
