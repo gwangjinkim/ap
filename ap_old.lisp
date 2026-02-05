@@ -287,15 +287,12 @@ Returns a function (lambda (name doc tgt) ...) => boolean
 
 Q can be:
   - NIL / \"\"                 => match everything
-  - string                     => regex by default, exact match if starts with \"=...\"
+  - string                     => regex by default, exact match if starts with \"=\"
   - symbol/keyword             => treated like its SYMBOL-NAME string
   - alist                      => e.g. '((:name . \"sheet\") (:doc . \"iterator\"))
                                  Keys: :name :doc :both. Values can be strings or symbols.
   - list of atoms              => defaults to OR  (sheet workbook) == (or sheet workbook)
-  - boolean DSL                => (or q1 q2 ...), (and q1 q2 ...), nestable
-
-Important: an ALIST query like ((:both . \"=SHEET\")) is an ATOM. It must *not*
-be treated as a plain list of sub-queries."
+  - boolean DSL                => (or q1 q2 ...), (and q1 q2 ...), nestable"
   (labels
       ((norm-s (x) (%q->string x))
        (mk-scanner (pat)
@@ -310,12 +307,13 @@ be treated as a plain list of sub-queries."
               (if case (string-equal needle field) (string= needle field))))
        (%qexpr-p (x)
          (and (consp x) (symbolp (car x)) (member (car x) '(and or) :test #'eq)))
-
        (%atom-matcher (atom)
          (cond
-           ((or (null atom) (and (stringp atom) (string= atom \"\")))
+           ;; nil / "" => match all
+           ((or (null atom) (and (stringp atom) (string= atom "")))
             (lambda (name doc tgt) (declare (ignore name doc tgt)) t))
 
+           ;; alist atom: targets override tgt
            ((%alistp atom)
             (let ((pairs atom)
                   (name-tests '())
@@ -346,6 +344,7 @@ be treated as a plain list of sub-queries."
                       (some (lambda (tst) (or (run1 tst name) (run1 tst doc)))
                             both-tests))))))
 
+           ;; regular atom: string/symbol/keyword/other -> string
            (t
             (let* ((s (norm-s atom)))
               (if (exactp s)
@@ -363,13 +362,9 @@ be treated as a plain list of sub-queries."
                         (:doc  (field-match scanner doc))
                         (:both (or (field-match scanner name)
                                    (field-match scanner doc)))))))))))
-
        (%cmp (x)
          (cond
-           ;; IMPORTANT: alist is an atom, check it before CONSP list handling.
-           ((%alistp x)
-            (%atom-matcher x))
-
+           ;; boolean DSL
            ((%qexpr-p x)
             (let* ((op (car x))
                    (subs (mapcar #'%cmp (cdr x))))
@@ -385,11 +380,19 @@ be treated as a plain list of sub-queries."
               (lambda (name doc tgt)
                 (some (lambda (f) (funcall f name doc tgt)) subs))))
 
+           ;; atom
            (t
             (%atom-matcher x)))))
     (%cmp q)))
 
 
+;;;; ----------------------------
+;;;; Thematic ordering (no LLMs)
+;;;; ----------------------------
+
+(defparameter *stop*
+  '("a" "an" "and" "or" "the" "to" "of" "in" "on" "for" "with" "from" "by"
+    "is" "are" "be" "this" "that" "it" "as" "at" "into" "nil" "t"))
 
 (defun %tok (s)
   (let* ((s (string-downcase s))
