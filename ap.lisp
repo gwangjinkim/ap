@@ -187,6 +187,89 @@ Signals an error if not found."
 ;;;; Query inference (regex always, exact via "=...")
 ;;;; ----------------------------
 
+(defun %qexpr-p (x)
+  "True if X looks like (and ...) or (or ...) query expression."
+  (and (consp x) (symbolp (car x)) (member (car x) '(and or) :test #'eq)))
+
+(defun %compile-q (q &key (case t))
+  "Compile Q into a predicate (lambda (name doc tgt) ...) -> boolean.
+
+Q forms:
+
+Atoms:
+  - string / symbol / keyword / number ... => treated as regex (or exact with \"=...\")
+  - alist: '((:name . \"...\") (:doc . \"...\") (:both . \"...\"))  ; may contain symbols as values too
+
+Combinators:
+  (or q1 q2 ...)
+  (and q1 q2 ...)
+Nested combinations are allowed.
+
+Semantics:
+  - Atoms respect TGT passed at runtime (:name/:doc/:both),
+    except alist atoms, which can specify :name/:doc/:both internally."
+  (labels ((norm-s (x) (%q->string x))
+           (exactp (s) (and (stringp s) (> (length s) 0) (char= (char s 0) #\=)))
+           (drop= (s) (subseq s 1))
+           (mk-scanner (pat)
+             (cl-ppcre:create-scanner pat :case-insensitive-mode case))
+           (field-match (scanner field)
+             (and field (cl-ppcre:scan scanner field)))
+           (field-exact (needle field)
+             (and field (if case (string-equal needle field) (string= needle field))))
+           (atom-matcher (atom)
+             ;; returns (lambda (name doc tgt) ...)
+             (cond
+               ;; nil / "" => match-all atom
+               ((or (null atom) (and (stringp atom) (string= atom "")))
+                (lambda (name doc tgt) (declare (ignore name doc tgt)) t))
+
+               ;; alist atom
+               ((%alistp atom)
+                (let ((m (%mk-matcher atom :case case)))
+                  ;; our earlier %mk-matcher(alist) already returns (name doc tgt)->bool
+                  m))
+
+               ;; any other atom => string/symbol/etc
+               (t
+                (let* ((s (norm-s atom)))
+                  (if (exactp s)
+                      (let ((needle (drop= s)))
+                        (lambda (name doc tgt)
+                          (ecase tgt
+                            (:name (field-exact needle name))
+                            (:doc  (field-exact needle doc))
+                            (:both (or (field-exact needle name)
+                                       (field-exact needle doc))))))
+                      (let ((scanner (mk-scanner s)))
+                        (lambda (name doc tgt)
+                          (ecase tgt
+                            (:name (field-match scanner name))
+                            (:doc  (field-match scanner doc))
+                            (:both (or (field-match scanner name)
+                                       (field-match scanner doc)))))))))))
+
+           (compile (x)
+             (cond
+               ((%qexpr-p x)
+                (let* ((op (car x))
+                       (subs (mapcar #'compile (cdr x))))
+                  (ecase op
+                    (or  (lambda (name doc tgt)
+                           (some (lambda (f) (funcall f name doc tgt)) subs)))
+                    (and (lambda (name doc tgt)
+                           (every (lambda (f) (funcall f name doc tgt)) subs))))))
+               ;; A plain list that is NOT (and/or ...) should default to (or ...)
+               ;; This makes (sheet workbook) mean OR by default (your example).
+               ((consp x)
+                (let ((subs (mapcar #'compile x)))
+                  (lambda (name doc tgt)
+                    (some (lambda (f) (funcall f name doc tgt)) subs))))
+               (t
+                (atom-matcher x)))))
+    (compile q)))
+
+
 (defun %qmode (q)
   "Returns (values normalized-q mode) where mode ∈ (:none :exact :regex)."
   (cond
@@ -203,89 +286,111 @@ Signals an error if not found."
 Returns a function (lambda (name doc tgt) ...) => boolean
 
 Q can be:
-  - NIL / \"\" => match everything
-  - string     => regex by default, exact match if starts with \"=\"
-  - symbol/keyword => treated like its SYMBOL-NAME string
-  - alist      => e.g. '((:name . \"sheet\") (:doc . \"iterator\"))
-                 Keys: :name :doc :both. Values can be strings or symbols."
-  (labels ((norm-s (x) (%q->string x))
-           (mk-scanner (pat)
-             ;; pat is a string; compile scanner once
-             (cl-ppcre:create-scanner pat
-                                      :case-insensitive-mode case))
-           (exactp (s)
-             (and (stringp s) (> (length s) 0) (char= (char s 0) #\=)))
-           (drop= (s) (subseq s 1))
-           (field-match (scanner field)
-             (and field (cl-ppcre:scan scanner field)))
-           (field-exact (needle field)
-             (and field
-                  (if case (string-equal needle field) (string= needle field)))))
-    (cond
-      ;; No query => match all
-      ((or (null q) (and (stringp q) (string= q "")))
-       (lambda (name doc tgt) (declare (ignore name doc tgt)) t))
+  - NIL / \"\"                 => match everything
+  - string                     => regex by default, exact match if starts with \"=\"
+  - symbol/keyword             => treated like its SYMBOL-NAME string
+  - alist                      => e.g. '((:name . \"sheet\") (:doc . \"iterator\"))
+                                 Keys: :name :doc :both. Values can be strings or symbols.
+  - list of atoms              => defaults to OR  (sheet workbook) == (or sheet workbook)
+  - boolean DSL                => (or q1 q2 ...), (and q1 q2 ...), nestable
 
-      ;; Alist query
-      ((%alistp q)
-       (let* ((pairs q)
-              (name-tests '())
-              (doc-tests  '())
-              (both-tests '()))
-         (dolist (kv pairs)
-           (destructuring-bind (k . v) kv
-             (let* ((s (norm-s v)))
-               (when s
-                 (cond
-                   ((eq k :name)
-                    (push (if (exactp s)
-                              (list :exact (drop= s))
-                              (list :re (mk-scanner s)))
-                          name-tests))
-                   ((eq k :doc)
-                    (push (if (exactp s)
-                              (list :exact (drop= s))
-                              (list :re (mk-scanner s)))
-                          doc-tests))
-                   ((or (eq k :both) (eq k t))
-                    (push (if (exactp s)
-                              (list :exact (drop= s))
-                              (list :re (mk-scanner s)))
-                          both-tests))
-                   (t
-                    ;; Unknown key: treat like :both for convenience
-                    (push (if (exactp s)
-                              (list :exact (drop= s))
-                              (list :re (mk-scanner s)))
-                          both-tests)))))))
-         (lambda (name doc tgt)
-           (declare (ignore tgt)) ; alist specifies targets; it overrides :tgt
-           (flet ((run1 (test field)
-                    (ecase (first test)
-                      (:re    (field-match (second test) field))
-                      (:exact (field-exact (second test) field)))))
-             (or (some (lambda (tst) (run1 tst name)) name-tests)
-                 (some (lambda (tst) (run1 tst doc))  doc-tests)
-                 (some (lambda (tst) (or (run1 tst name) (run1 tst doc))) both-tests))))))
+Atoms inside lists can be strings/symbols/keywords/alists/etc."
+  (labels
+      ((norm-s (x) (%q->string x))
+       (mk-scanner (pat)
+         (cl-ppcre:create-scanner pat :case-insensitive-mode case))
+       (exactp (s)
+         (and (stringp s) (> (length s) 0) (char= (char s 0) #\=)))
+       (drop= (s) (subseq s 1))
+       (field-match (scanner field)
+         (and field (cl-ppcre:scan scanner field)))
+       (field-exact (needle field)
+         (and field
+              (if case (string-equal needle field) (string= needle field))))
+       (%qexpr-p (x)
+         (and (consp x) (symbolp (car x)) (member (car x) '(and or) :test #'eq)))
+       (%atom-matcher (atom)
+         ;; returns (lambda (name doc tgt) ...) -> boolean
+         (cond
+           ;; nil / "" => match all
+           ((or (null atom) (and (stringp atom) (string= atom "")))
+            (lambda (name doc tgt) (declare (ignore name doc tgt)) t))
 
-      ;; Single query (string/symbol/keyword/etc.)
-      (t
-       (let* ((s (norm-s q)))
-         (if (exactp s)
-             (let ((needle (drop= s)))
-               (lambda (name doc tgt)
-                 (ecase tgt
-                   (:name (field-exact needle name))
-                   (:doc  (field-exact needle doc))
-                   (:both (or (field-exact needle name)
-                              (field-exact needle doc))))))
-             (let ((scanner (mk-scanner s)))
-               (lambda (name doc tgt)
-                 (ecase tgt
-                   (:name (field-match scanner name))
-                   (:doc  (field-match scanner doc))
-                   (:both (or (field-match scanner name)
-                              (field-match scanner doc))))))))))))
+           ;; alist atom: targets override tgt
+           ((%alistp atom)
+            (let ((pairs atom)
+                  (name-tests '())
+                  (doc-tests '())
+                  (both-tests '()))
+              (dolist (kv pairs)
+                (destructuring-bind (k . v) kv
+                  (let ((s (norm-s v)))
+                    (when s
+                      (labels ((push-test (where s)
+                                 (push (if (exactp s)
+                                           (list :exact (drop= s))
+                                           (list :re (mk-scanner s)))
+                                       where)))
+                        (cond
+                          ((eq k :name) (push-test name-tests s))
+                          ((eq k :doc)  (push-test doc-tests s))
+                          ((or (eq k :both) (eq k t)) (push-test both-tests s))
+                          (t (push-test both-tests s))))))))
+              (lambda (name doc tgt)
+                (declare (ignore tgt)) ; alist decides its own targets
+                (flet ((run1 (test field)
+                         (ecase (first test)
+                           (:re    (field-match (second test) field))
+                           (:exact (field-exact (second test) field)))))
+                  (or (some (lambda (tst) (run1 tst name)) name-tests)
+                      (some (lambda (tst) (run1 tst doc))  doc-tests)
+                      (some (lambda (tst) (or (run1 tst name) (run1 tst doc)))
+                            both-tests))))))
+
+           ;; regular atom: string/symbol/keyword/other -> string
+           (t
+            (let* ((s (norm-s atom)))
+              (if (exactp s)
+                  (let ((needle (drop= s)))
+                    (lambda (name doc tgt)
+                      (ecase tgt
+                        (:name (field-exact needle name))
+                        (:doc  (field-exact needle doc))
+                        (:both (or (field-exact needle name)
+                                   (field-exact needle doc))))))
+                  (let ((scanner (mk-scanner s)))
+                    (lambda (name doc tgt)
+                      (ecase tgt
+                        (:name (field-match scanner name))
+                        (:doc  (field-match scanner doc))
+                        (:both (or (field-match scanner name)
+                                   (field-match scanner doc)))))))))))
+       (%compile (x)
+         ;; compile any q object into a matcher closure
+         (cond
+           ;; boolean DSL
+           ((%qexpr-p x)
+            (let* ((op (car x))
+                   (subs (mapcar #'%compile (cdr x))))
+              (ecase op
+                (or  (lambda (name doc tgt)
+                       (some (lambda (f) (funcall f name doc tgt)) subs)))
+                (and (lambda (name doc tgt)
+                       (every (lambda (f) (funcall f name doc tgt)) subs))))))
+
+           ;; plain list (not and/or): default OR across elements
+           ((consp x)
+            (let ((subs (mapcar #'%compile x)))
+              (lambda (name doc tgt)
+                (some (lambda (f) (funcall f name doc tgt)) subs))))
+
+           ;; atom
+           (t
+            (%atom-matcher x)))))
+
+    (%compile q)))
+
+
 
 ;;;; ----------------------------
 ;;;; Thematic ordering (no LLMs)
