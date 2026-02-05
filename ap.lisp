@@ -211,33 +211,66 @@
 ;;;; Main command: ap
 ;;;; ----------------------------
 
-(defun ap (&optional (pkg ".") (q nil)
-           &key
-             (k *kinds*)         ; kinds
-             (exp *exp*)         ; exported-only-p
-             (case *case*)       ; case-insensitive
-             (lim *lim*)         ; limit
-             (min nil)           ; thematic min similarity => enable thematic
-             (tgt :both)         ; :name :doc :both
-             (u nil)             ; show undocumented
-             (s *standard-output*))
-  "Quick REPL symbol browser.
+(defun %ap (&key
+              (pkg ".")
+              (q nil)
+              (k *kinds*)
+              (exp *exp*)
+              (case *case*)
+              (lim *lim*)
+              (min nil)
+              (tgt :both)
+              (u nil)
+              (s *standard-output*))
+  "Worker for AP (rich &KEY interface, good for DESCRIBE).
 
-(ap \".\" \"hash\")                     ; current package, regex search
-(ap nil \"hash|table\" :k '(function))  ; all packages, functions only
-(ap \"SB-EXT\" \"=WITH-TIMEOUT\")       ; exact match
-(ap \"CL\" \"hash\" :min 0.08)          ; thematic ordering
-(ap \"CL\" nil :k '(:macro) :u t)       ; list macros (show undocumented)
+This is the \"real\" implementation. The public function `ap` is a REPL-friendly
+wrapper that accepts positional arguments as a convenience, then forwards into
+%AP with the same keyword interface.
 
-Keywords (short):
-  :k   kinds list or :all
-  :exp exported-only (T default)
-  :case case-insensitive (T default)
-  :lim limit
-  :min thematic min similarity (number enables thematic)
-  :tgt :name/:doc/:both (default :both)
-  :u   include undocumented
-  :s   stream"
+Keys:
+
+  :pkg  Package selector.
+
+        Accepts:
+          - \".\"              => current *package*
+          - NIL or \"\"        => all packages
+          - \"CL\" or :cl      => that package
+          - a package object   => that package
+          - (\"CL\" \"SB-EXT\") => multiple packages
+
+  :q    Query string.
+
+        By default this is treated as a CL-PPCRE regex (fast; compiled once).
+        For exact match, prefix with \"=\", e.g. \"=WITH-TIMEOUT\".
+
+        If :q is NIL or \"\", no filtering is done (useful to list an API).
+
+  :k    Kinds filter: list or :all.
+        Examples:
+          '(function) '(function macro) '(class) :all
+
+  :exp  Exported-only-p. Default T.
+        When NIL, include internal symbols too.
+
+  :case Case-insensitive-p. Default T.
+
+  :lim  Limit number of printed rows. Default *LIM* (often NIL).
+
+  :min  Thematic ordering threshold.
+        If a number, enables thematic ordering (local token similarity; no LLMs).
+        If NIL, results are sorted description-first, then name.
+
+  :tgt  Match target: :name, :doc, or :both (default :both).
+
+  :u    Include undocumented symbols. Default NIL.
+        When NIL, symbols with no docstring are filtered out.
+
+  :s    Output stream. Default *STANDARD-OUTPUT*.
+
+Returns:
+  (values count items)
+where ITEMS is the internal item list used for printing."
   (let* ((pkgs (%pkgs pkg))
          (kinds (%norm-kinds k))
          (m (%mk-matcher q :case case))
@@ -302,3 +335,72 @@ Keywords (short):
       (format s "~&~A~%Printed ~D item~:P.~%"
               (make-string 96 :initial-element #\=) n)
       (values n items))))
+
+(defun ap (&rest args)
+  "Public REPL-friendly AP (warning-free on SBCL), with flexible positional args.
+
+This function accepts:
+  - 0 positional args
+  - 1 positional arg (treated as QUERY by default)
+  - 2 positional args (PKG, QUERY)
+plus any number of keyword arguments.
+
+Calling forms:
+
+  (ap)
+    => same as (ap \".\" nil)
+
+  (ap q)
+    => same as (ap \".\" q)
+       (one positional arg is treated as QUERY by default)
+
+  (ap pkg q)
+    => explicit package selector + query
+
+  (ap :pkg pkg :q q ...)
+    => keyword-only style
+
+Examples:
+
+  (ap)                                  ; list current package API (exported)
+  (ap \"hash\")                           ; query in current package
+  (ap \".\" \"hash\")                       ; explicit current package + query
+  (ap nil \"hash|table\" :k '(function))   ; all packages, functions only
+  (ap \"SB-EXT\" \"=WITH-TIMEOUT\")         ; exact match
+  (ap :pkg \"CL\" :q \"hash\" :tgt :doc)    ; keyword-only style
+  (ap \"CL\" \"stream\" :min 0.08)          ; thematic ordering
+
+Ambiguity note:
+  If you write (ap \"CL\"), should that mean package CL or query \"CL\"?
+  AP treats a single positional argument as QUERY. If you mean a package,
+  write (ap :pkg \"CL\") or pass two args (ap \"CL\" nil).
+
+Introspection:
+  (describe 'ap::%ap) shows the complete keyword interface and defaults."
+  ;; If first arg is a keyword => pure keyword mode.
+  (when (and args (keywordp (first args)))
+    (return-from ap (apply #'%ap args)))
+
+  ;; Otherwise: parse up to two positionals, then a keyword plist.
+  (let* ((a1 (first args))
+         (a2 (second args))
+         (pos-count (cond ((null args) 0)
+                          ((or (null a2) (keywordp a2)) 1)
+                          (t 2)))
+         (plist (cond
+                 ((= pos-count 0) nil)
+                 ((= pos-count 1) (if (keywordp a2) (rest args) nil))
+                 (t (nthcdr 2 args))))
+         (pkg (ecase pos-count
+                (0 ".")
+                (1 ".")   ; 1 arg => query by default
+                (2 a1)))
+         (q   (ecase pos-count
+                (0 nil)
+                (1 a1)
+                (2 a2))))
+    ;; Allow explicit :pkg/:q to override positionals if present.
+    (apply #'%ap
+           :pkg (if (and plist (member :pkg plist)) (getf plist :pkg) pkg)
+           :q   (if (and plist (member :q plist))   (getf plist :q)   q)
+           plist)))
