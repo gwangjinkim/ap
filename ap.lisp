@@ -42,8 +42,8 @@
 (defun %pkg (x)
   (etypecase x
     (package x)
-    (string (or (find-package x) (error "No such package: ~S" x)))
-    (symbol (or (find-package (symbol-name x)) (error "No such package: ~S" x)))))
+    (string (or (find-package (string-upcase x)) (error "No such package: ~S" x)))
+    (symbol (or (find-package (symbol-name (string-upcase x))) (error "No such package: ~S" x)))))
 
 (defun %pkgs (sel)
   (cond
@@ -271,6 +271,7 @@ Keys:
 Returns:
   (values count items)
 where ITEMS is the internal item list used for printing."
+
   (let* ((pkgs (%pkgs pkg))
          (kinds (%norm-kinds k))
          (m (%mk-matcher q :case case))
@@ -312,7 +313,7 @@ where ITEMS is the internal item list used for printing."
 
     ;; print
     (format s "~&~A~%" (make-string 96 :initial-element #\=))
-    (format s "~&ap  pkgs: ~A  exp:~A  kinds:~A  tgt:~A  min:~A  q:~S~%"
+    (format s "~&ap  pkg: ~A  exp:~A  k(kinds):~A  tgt:~A  min:~A  q:~S~%"
             (cond
               ((or (null pkg) (and (stringp pkg) (string= pkg ""))) "ALL")
               ((and (stringp pkg) (string= pkg ".")) (package-name *package*))
