@@ -21,6 +21,13 @@
 
 (in-package #:ap)
 
+
+(defparameter *stop*
+  '("a" "an" "and" "are" "as" "at" "be" "but" "by" "for" "from" "has" "have"
+    "in" "into" "is" "it" "its" "of" "on" "or" "that" "the" "their" "then" "this"
+    "to" "with" "when" "where" "while" "who" "whom" "why" "will" "would" "can" "could"
+    "should" "may" "might" "not" "no" "nil" "t")
+  "Stop-tokens ignored by %TOK (used for thematic features).")
 ;;; cl-ppcre is a system dependency; no lazy loading needed.
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (unless (find-package "CL-PPCRE")
