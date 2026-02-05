@@ -40,10 +40,23 @@
 ;;;; ----------------------------
 
 (defun %pkg (x)
-  (etypecase x
-    (package x)
-    (string (or (find-package x) (error "No such package: ~S" x)))
-    (symbol (or (find-package (symbol-name x)) (error "No such package: ~S" x)))))
+  "Resolve X to a package object.
+
+Accepted:
+  - package object => itself
+  - string         => case-insensitive package name
+  - symbol/keyword => case-insensitive package name via SYMBOL-NAME
+Signals an error if not found."
+  (cond
+    ((packagep x) x)
+    ((stringp x)
+     (or (find-package (string-upcase x))
+         (error "No such package: ~S" x)))
+    ((symbolp x)  ;; includes keywords
+     (or (find-package (string-upcase (symbol-name x)))
+         (error "No such package: ~S" x)))
+    (t
+     (error "Invalid package designator: ~S" x))))
 
 (defun %pkgs (sel)
   (cond
