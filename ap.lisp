@@ -39,6 +39,19 @@
 ;;;; Helpers
 ;;;; ----------------------------
 
+(defun %q->string (x)
+  "Normalize a single query atom to a string (or NIL)."
+  (cond
+    ((null x) nil)
+    ((stringp x) x)
+    ((symbolp x) (symbol-name x)) ; includes keywords
+    (t (princ-to-string x))))
+
+(defun %alistp (x)
+  "Heuristic: an alist is a proper list of conses."
+  (and (listp x)
+       (every (lambda (e) (and (consp e))) x)))
+
 (defun %pkg (x)
   "Resolve X to a package object.
 
@@ -184,22 +197,95 @@ Signals an error if not found."
     (t
      (values q :regex))))
 
-(defun %mk-matcher (query &key (case t))
-  "Returns a predicate (lambda (string) boolean)."
-  (multiple-value-bind (q mode) (%qmode query)
-    (ecase mode
-      (:none
-       (lambda (s) (declare (ignore s)) t))
-      (:exact
-       (let ((qq (if case (string-downcase q) q)))
-         (lambda (s)
-           (let ((ss (if case (string-downcase s) s)))
-             (string= ss qq)))))
-      (:regex
-       (let* ((pat (if case (concatenate 'string "(?i)" q) q))
-              (scanner (cl-ppcre:create-scanner pat)))
-         (lambda (s)
-           (not (null (cl-ppcre:scan scanner s)))))))))
+(defun %mk-matcher (q &key (case t))
+  "Build a matcher closure.
+
+Returns a function (lambda (name doc tgt) ...) => boolean
+
+Q can be:
+  - NIL / \"\" => match everything
+  - string     => regex by default, exact match if starts with \"=\"
+  - symbol/keyword => treated like its SYMBOL-NAME string
+  - alist      => e.g. '((:name . \"sheet\") (:doc . \"iterator\"))
+                 Keys: :name :doc :both. Values can be strings or symbols."
+  (labels ((norm-s (x) (%q->string x))
+           (mk-scanner (pat)
+             ;; pat is a string; compile scanner once
+             (cl-ppcre:create-scanner pat
+                                      :case-insensitive-mode case))
+           (exactp (s)
+             (and (stringp s) (> (length s) 0) (char= (char s 0) #\=)))
+           (drop= (s) (subseq s 1))
+           (field-match (scanner field)
+             (and field (cl-ppcre:scan scanner field)))
+           (field-exact (needle field)
+             (and field
+                  (if case (string-equal needle field) (string= needle field)))))
+    (cond
+      ;; No query => match all
+      ((or (null q) (and (stringp q) (string= q "")))
+       (lambda (name doc tgt) (declare (ignore name doc tgt)) t))
+
+      ;; Alist query
+      ((%alistp q)
+       (let* ((pairs q)
+              (name-tests '())
+              (doc-tests  '())
+              (both-tests '()))
+         (dolist (kv pairs)
+           (destructuring-bind (k . v) kv
+             (let* ((s (norm-s v)))
+               (when s
+                 (cond
+                   ((eq k :name)
+                    (push (if (exactp s)
+                              (list :exact (drop= s))
+                              (list :re (mk-scanner s)))
+                          name-tests))
+                   ((eq k :doc)
+                    (push (if (exactp s)
+                              (list :exact (drop= s))
+                              (list :re (mk-scanner s)))
+                          doc-tests))
+                   ((or (eq k :both) (eq k t))
+                    (push (if (exactp s)
+                              (list :exact (drop= s))
+                              (list :re (mk-scanner s)))
+                          both-tests))
+                   (t
+                    ;; Unknown key: treat like :both for convenience
+                    (push (if (exactp s)
+                              (list :exact (drop= s))
+                              (list :re (mk-scanner s)))
+                          both-tests)))))))
+         (lambda (name doc tgt)
+           (declare (ignore tgt)) ; alist specifies targets; it overrides :tgt
+           (flet ((run1 (test field)
+                    (ecase (first test)
+                      (:re    (field-match (second test) field))
+                      (:exact (field-exact (second test) field)))))
+             (or (some (lambda (tst) (run1 tst name)) name-tests)
+                 (some (lambda (tst) (run1 tst doc))  doc-tests)
+                 (some (lambda (tst) (or (run1 tst name) (run1 tst doc))) both-tests))))))
+
+      ;; Single query (string/symbol/keyword/etc.)
+      (t
+       (let* ((s (norm-s q)))
+         (if (exactp s)
+             (let ((needle (drop= s)))
+               (lambda (name doc tgt)
+                 (ecase tgt
+                   (:name (field-exact needle name))
+                   (:doc  (field-exact needle doc))
+                   (:both (or (field-exact needle name)
+                              (field-exact needle doc))))))
+             (let ((scanner (mk-scanner s)))
+               (lambda (name doc tgt)
+                 (ecase tgt
+                   (:name (field-match scanner name))
+                   (:doc  (field-match scanner doc))
+                   (:both (or (field-match scanner name)
+                              (field-match scanner doc))))))))))))
 
 ;;;; ----------------------------
 ;;;; Thematic ordering (no LLMs)
@@ -336,11 +422,7 @@ where ITEMS is the internal item list used for printing."
                (ks (%kset sym)))
           (when (and (%want-kind-p ks kinds)
                      (or u doc)
-                     (ecase tgt
-                       (:name (funcall m name))
-                       (:doc  (funcall m (or doc "")))
-                       (:both (or (funcall m name)
-                                  (funcall m (or doc ""))))))
+                     (funcall m name (or doc "") tgt))
             (push (list :p p :sym sym :n name :d doc :k ks :f (%feat name doc))
                   items)))))
 
