@@ -42,8 +42,8 @@
 (defun %pkg (x)
   (etypecase x
     (package x)
-    (string (or (find-package (string-upcase x)) (error "No such package: ~S" x)))
-    (symbol (or (find-package (symbol-name (string-upcase x))) (error "No such package: ~S" x)))))
+    (string (or (find-package x) (error "No such package: ~S" x)))
+    (symbol (or (find-package (symbol-name x)) (error "No such package: ~S" x)))))
 
 (defun %pkgs (sel)
   (cond
@@ -337,47 +337,42 @@ where ITEMS is the internal item list used for printing."
               (make-string 96 :initial-element #\=) n)
       (values n items))))
 
-(defun %pkg-name->package (name)
-  "Return package for NAME (string/symbol/keyword), case-insensitive.
-Return NIL if not found."
-  (etypecase name
-    (string (find-package (string-upcase name)))
-    (symbol (find-package (string-upcase (symbol-name name))))))
+(defun %pkg-name->package (x)
+  "Return a package object if X names a package, otherwise NIL.
+Case-insensitive for strings/symbols/keywords."
+  (cond
+    ((packagep x) x)
+    ((stringp x) (find-package (string-upcase x)))
+    ((symbolp x) (find-package (string-upcase (symbol-name x))))
+    (t nil)))
 
 (defun %package-designator-p (x)
-  "True if X looks like a *single* package selector."
+  "True if X looks like a *single* package selector.
+Includes NIL (meaning all packages) and special strings \".\"/\"\"."
   (cond
-    ((null x) t)                          ; NIL => all packages
+    ((null x) t)
     ((packagep x) t)
     ((and (stringp x) (or (string= x ".") (string= x ""))) t)
-    ((stringp x) (not (null (%pkg-name->package x))))
-    ((or (symbolp x) (keywordp x)) (not (null (%pkg-name->package x))))
+    ((or (stringp x) (symbolp x)) (not (null (%pkg-name->package x))))
     (t nil)))
 
 (defun %list-of-packages-p (x)
-  "True if X is a list meant as a package selector.
-
-We accept:
-  - a proper list where *every* element is a package designator
-  - the empty list NIL is handled separately (meaning ALL packages)"
+  "True if X is a non-empty list of package designators."
   (and (listp x)
        (not (null x))
        (every #'%package-designator-p x)))
 
 (defun %ap-option-keyword-p (x)
-  "Keywords understood by AP's public interface."
   (and (keywordp x)
-       (member x '(:pkg :q :k :exp :case :lim :min :tgt :u :s)
-               :test #'eq)))
+       (member x '(:pkg :q :k :exp :case :lim :min :tgt :u :s) :test #'eq)))
 
 (defun %fix-implicit-q (plist)
-  "Accept (:pkg X \"q\" ...) by inserting :q if :q is absent and plist is odd.
-Also keeps plist unchanged if already well-formed."
+  "Accept (:pkg X \"q\" ...) by inserting :q if :q is absent and plist is odd."
   (cond
     ((null plist) plist)
     ((member :q plist :test #'eq) plist)
-    ;; odd length and last item is a non-keyword => treat it as implicit :q value
-    ((and (oddp (length plist))
+    ((and (member :pkg plist :test #'eq)
+          (oddp (length plist))
           (not (keywordp (car (last plist)))))
      (append (butlast plist 1) (list :q (car (last plist)))))
     (t plist)))
