@@ -292,9 +292,7 @@ Q can be:
   - alist                      => e.g. '((:name . \"sheet\") (:doc . \"iterator\"))
                                  Keys: :name :doc :both. Values can be strings or symbols.
   - list of atoms              => defaults to OR  (sheet workbook) == (or sheet workbook)
-  - boolean DSL                => (or q1 q2 ...), (and q1 q2 ...), nestable
-
-Atoms inside lists can be strings/symbols/keywords/alists/etc."
+  - boolean DSL                => (or q1 q2 ...), (and q1 q2 ...), nestable"
   (labels
       ((norm-s (x) (%q->string x))
        (mk-scanner (pat)
@@ -310,7 +308,6 @@ Atoms inside lists can be strings/symbols/keywords/alists/etc."
        (%qexpr-p (x)
          (and (consp x) (symbolp (car x)) (member (car x) '(and or) :test #'eq)))
        (%atom-matcher (atom)
-         ;; returns (lambda (name doc tgt) ...) -> boolean
          (cond
            ;; nil / "" => match all
            ((or (null atom) (and (stringp atom) (string= atom "")))
@@ -337,7 +334,7 @@ Atoms inside lists can be strings/symbols/keywords/alists/etc."
                           ((or (eq k :both) (eq k t)) (push-test both-tests s))
                           (t (push-test both-tests s))))))))
               (lambda (name doc tgt)
-                (declare (ignore tgt)) ; alist decides its own targets
+                (declare (ignore tgt))
                 (flet ((run1 (test field)
                          (ecase (first test)
                            (:re    (field-match (second test) field))
@@ -365,13 +362,12 @@ Atoms inside lists can be strings/symbols/keywords/alists/etc."
                         (:doc  (field-match scanner doc))
                         (:both (or (field-match scanner name)
                                    (field-match scanner doc)))))))))))
-       (%compile (x)
-         ;; compile any q object into a matcher closure
+       (%cmp (x)
          (cond
            ;; boolean DSL
            ((%qexpr-p x)
             (let* ((op (car x))
-                   (subs (mapcar #'%compile (cdr x))))
+                   (subs (mapcar #'%cmp (cdr x))))
               (ecase op
                 (or  (lambda (name doc tgt)
                        (some (lambda (f) (funcall f name doc tgt)) subs)))
@@ -380,16 +376,14 @@ Atoms inside lists can be strings/symbols/keywords/alists/etc."
 
            ;; plain list (not and/or): default OR across elements
            ((consp x)
-            (let ((subs (mapcar #'%compile x)))
+            (let ((subs (mapcar #'%cmp x)))
               (lambda (name doc tgt)
                 (some (lambda (f) (funcall f name doc tgt)) subs))))
 
            ;; atom
            (t
             (%atom-matcher x)))))
-
-    (%compile q)))
-
+    (%cmp q)))
 
 
 ;;;; ----------------------------
